@@ -1,0 +1,162 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Nov  5 13:31:53 2025
+
+@author: 33782
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+import scipy.stats
+
+
+#%% Les variables
+
+N = 100        #Cote de la matrice
+T_boltz = 1
+J = 50
+lbda = 2
+V_cible = 500
+
+
+
+
+#%% Les conditions initiales
+
+def initial_state_carre():
+    '''
+
+    Returns
+    -------
+    Une matrice de 0 de taille N avec un carre de 1 au centre
+    '''
+
+    M = np.zeros((N, N))
+    M[20:80, 40:60] = 1
+
+    return M
+
+def initial_state_aleat(n):
+    '''
+    Parameters
+    ----------
+    M=n : TYPE: int
+        le nombre de points 1 au départ
+
+    Returns
+    -------
+    M : Matrice NxN
+        avec n points 1, sinon 0 partout
+
+    '''
+    M = np.zeros((N, N))
+    couple_change = np.random.randint(0,N, (n,2))
+    for elt in couple_change:
+        M[elt[0], elt[1]] = 1
+    return M
+
+#%%
+
+def Energie_tot(M, J=J, lbda=lbda, V_cible=V_cible):
+    '''
+    Parameters
+    ----------
+    M : TYPE: Matrice NxN
+        La matrice de départ
+    J : float, optional
+        L'énergie d'interface. The default is J.
+    lbda : float, optional
+        l'énergie de contrainte de volume. The default is lbda.
+    V_cible : float, optional
+        Lz volume cible. The default is V_cible.
+
+    Returns
+    -------
+    Float
+    L'énergie totale de la matrice M'
+
+    '''
+    v_cell = np.sum(M)    #A VERIFIER? COMMENT DETEMRINER CE VOLUME
+
+    up, down, left, right = np.roll(M, -1, axis=0), np.roll(M,  1, axis=0), np.roll(M, -1, axis=1), np.roll(M,  1, axis=1)
+    # contient dans l'ordre M[i+1, j] M[i-1, j]  M[i, j+ 1] M[i, j-1] , pour calculer les interfaces
+
+    # Interface = somme des différences absolues locales
+    interface = np.sum(np.abs(M - up) + np.abs(M - down) + np.abs(M - left) + np.abs(M - right))
+
+    # On divise par 2 car chaque interface est comptée 2 fois
+    return J * interface / 2 + lbda * (v_cell - V_cible)**2
+
+
+
+
+
+#%%
+
+def increase_temps(M, nb_change):
+    '''
+    Parameters
+    ----------
+    M : matrice, de taille NxN
+        La matrice de laquelle on part
+    nb_change : int
+        Le nombre de changements par pas de temps
+
+    Returns
+    -------
+    M : matrice, de taille NxN
+        La MEME matrice, avec modifications eventuellement
+
+    '''
+    for _ in range(nb_change):
+        i, j = np.random.randint(0, N, 2) #l'indice de la matrice à changer
+
+
+        val_old = M[i,j]   #Au lieu de faire une copie de toute ma matrice avec np.copy, je fais juste une copie de l'élément intéresant
+        val_new = 1 - val_old
+
+
+        dV = (val_new - val_old)     #Prendra la valeur +- 1
+
+
+        voisins = M[(i+1)%N, j] + M[(i-1)%N, j] + M[i, (j+1)%N] + M[i, (j-1)%N] #Pareil pour l'interfaace, je n'ai pas besoi de tout reclculer, mais uste localement
+        #CLP, pour ne pas s'embéter avec les bords
+
+        vol_si_accepte = np.sum(M)
+        dE_vol = lbda * (vol_si_accepte + dV - V_cible)**2 - lbda * (vol_si_accepte - V_cible)**2
+
+        if val_old == 0:
+            dE_int = J * (2 - voisins)   # La logique m'est apparue tard, à vérifier...
+        else:
+            dE_int = J * (voisins - 2)
+
+        dE = dE_vol + dE_int
+
+        if dE <= 0 or np.random.rand() < np.exp(-dE / T_boltz): #Metropolis (cf cours M1 C)
+            M[i,j] = val_new  # accepter
+
+    return M
+
+
+
+
+#%%
+
+M = initial_state_aleat()
+# M = initial_state_carre(500)
+plt.imshow(M)
+
+
+#%%
+
+def def_temp(M, nb_pas):
+    M = np.copy(M)
+    for i in range(nb_pas):
+        increase_temps(M, 10)
+        if i % 100 == 0:
+            plt.imshow(M)
+            plt.title(i)
+            plt.show()
+
+def_temp(M, 10000)
+
