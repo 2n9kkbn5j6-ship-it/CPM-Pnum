@@ -1,0 +1,91 @@
+def initial_state_carre(a):
+    '''
+
+    Returns
+    -------
+    Une matrice de 0 de taille N avec un carre de 1 au centre de volume V
+
+    Ici N et V sont pairs
+    '''
+
+    M = np.zeros((N, N))
+    M[(N//2-a//2):(N//2+a//2), (N//2-a//2):(N//2+a//2)] = 1
+
+    return M
+def increase_temps(M, nb_change, J = J, lbda=lbda, V_cible=V_cible):
+    '''
+    Parameters
+    ----------
+    M : matrice, de taille NxN
+        La matrice de laquelle on part
+    nb_change : int
+        Le nombre de changements par pas de temps
+
+    Returns
+    -------
+    M : matrice, de taille NxN
+        La MEME matrice, avec modifications eventuellement
+
+    '''
+    for _ in range(nb_change):
+        i, j = np.random.randint(0, N, 2) #l'indice de la matrice à changer
+
+
+        val_old = M[i,j]   #Au lieu de faire une copie de toute ma matrice avec np.copy, je fais juste une copie de l'élément intéresant
+        #val_new = 1 - val_old
+
+        voisins = [M[(i+1)%N, j], M[(i-1)%N, j], M[i, (j+1)%N], M[i, (j-1)%N]] #Pareil pour l'interfaace, je n'ai pas besoi de tout reclculer, mais uste localement
+        voisins_connectes = [M[(i+1)%N, j], M[(i-1)%N, j], M[i, (j+1)%N], M[i, (j-1)%N],M[(i+1)%N, (j+1)%N],M[(i+1)%N, (j-1)%N],M[(i-1)%N, (j+1)%N],M[(i-1)%N, (j-1)%N]]
+        val_new = np.random.choice(voisins_connectes)
+
+        dE_int = 0
+        for v in voisins:
+            dE_int += J(val_new, v) - J(val_old, v)
+
+
+        dV1 = (1 if val_new == 1 else 0) - (1 if val_old == 1 else 0)
+        V1 = np.sum(M == 1)
+        dE_vol = lbda * ((V1 + dV1 - V_cible)**2 - (V1 - V_cible)**2)
+
+
+        dE = dE_vol + dE_int
+
+        if dE <= 0 or np.random.rand() < np.exp(-dE / T_boltz): #Metropolis (cf cours M1 C)
+            M[i,j] = val_new  # accepter
+
+    return M
+
+M = initial_state_carre(30)
+# M = initial_state_rond(25)
+plt.imshow(M)
+
+
+
+#%%
+
+def def_temp(M, nb_pas):
+    M = np.copy(M)
+    summ = np.zeros(nb_pas)
+    for i in range(nb_pas):
+        increase_temps(M, 10)
+        summ[i] = np.sum(M)
+        '''if i % 10000 == 0:
+            plt.imshow(M)
+            plt.title(i)
+            plt.axis('off')
+            plt.show()'''
+    plt.plot(np.arange(0,nb_pas, 1), summ)
+
+    plt.show()
+    # plt.plot(np.arange(0,nb_pas, 1), summ)
+    # plt.xlabel('temps')
+    # plt.ylabel('nombre de pixels 1')
+
+def_temp(M, 20000)
+
+#Temps caracteristiques
+
+
+#Rondité
+
+#Diffusion spatiale
