@@ -1,0 +1,196 @@
+ -*- coding: utf-8 -*-
+"""
+Created on Wed Nov 12 07:28:19 2025
+
+@author: 33782
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy import ndimage
+
+
+#%%
+
+N = 100        #Cote de la matrice
+T_boltz = 1
+J_11 = 1
+J_10 = 10
+lbda = 0.5
+V_cible_c1 = 1000
+V_cible_c2 = 500
+
+
+
+#%%
+
+
+def initial_state_2_rond(r):
+    M = np.zeros((N, N, 1))
+    centre_x_1, centre_y_1 = int(2*N/3), int(2*N/3)
+    centre_x_2, centre_y_2 = int(N/3), int(N/3)
+
+
+    for i in range(N):
+        for j in range(N):
+            if np.sqrt((i - centre_x_1)**2 + (j - centre_y_1)**2) <= r:
+                M[i,j,0] = 1
+                M[i,j,1] = 1   #cellule numéro 1
+
+    for i in range(N):
+        for j in range(N):
+            if np.sqrt((i - centre_x_2)**2 + (j - centre_y_2)**2) <= r:
+                M[i,j, 0] = 1
+                M[i,j,1] = 2   #Cellule numéro 2
+    return M
+
+
+def initial_state_2_carre():
+    M = np.zeros((N, N, 2), dtype=int)
+    M[40:60, 40:60, 0] = 1
+    M[40:60, 40:60, 1] = 1
+    M[50:70, 55:75, 0] = 1
+    M[50:70, 55:75, 1] = 2
+    return M
+#plt.imshow(initial_state_2_rond(35))
+
+#%%
+
+def plot_cell(M, time=None):
+    plt.imshow(M[:,:,0])
+    a = M[:,:,1]
+    plt.imshow(ndimage.binary_dilation(a).astype(a.dtype))
+    if time is not None:
+        plt.title(f"t = {time}")
+    plt.axis('off')
+    plt.show()
+
+def plot_ids(M, time = None):
+    plt.imshow(M[:,:,1])
+    if time is not None:
+        plt.title(f"t = {time}")
+    plt.axis('off')
+    # plt.colorbar()
+    plt.show()
+
+
+
+#%%
+
+def J(type_cell, id_cell, type_voisin, id_voisin):
+            #SUPER MOCHE, A REECRIRE JOLI... et optimisé
+    if type_cell == 0 and type_voisin == 0:
+        return 0.0
+
+    if type_cell == 1 and type_voisin == 0:
+        return J_10
+
+    if type_cell == 0 and type_voisin == 1:
+        return J_10
+
+    # lzs deux occupés
+    if id_cell != 0 and id_voisin != 0 and type_cell != type_voisin:
+        return J_11
+
+    return 0.0
+
+#%%
+
+def increase_temps(M, nb_change, T=T_boltz, J_10=J_10, J_20=J_20, J_12=J_12, lbda=lbda, V_cible=V_cible):
+    '''
+    Parameters
+    ----------
+    M : matrice, de taille NxN
+        La matrice de laquelle on part
+    nb_change : int
+        Le nombre de changements par pas de temps
+
+    Returns
+    -------
+    M : matrice, de taille NxN
+        La MEME matrice, avec modifications eventuellement
+
+    '''
+
+    voisins_numero = [(1,0),(-1,0),(0,1),(0,-1)]
+
+    for _ in range(nb_change):
+
+        i, j = np.random.randint(0, N, 2) #l'indice de la matrice à changer
+
+
+        val_old = M[i,j,0]   #Au lieu de faire une copie de toute ma matrice avec np.copy, je fais juste une copie de l'élément intéresant
+        cell_old = M[i,j,1] #L'ancien numéro de la matrice
+
+        di, dj = voisins_numero[np.random.randint(0,4)]
+        ni, nj = (i + di) % N, (j + dj) % N #Choisir le nouveau voisin, aleatoireemten
+
+        val_new, cell_new = M[ni, nj, :]
+
+        if cell_new == cell_old:
+            continue        #Par soucis d'optimisation, on necalcule rien si on ne change rine
+
+
+
+        dE_int = 0
+        for (dx, dy) in voisins_numero:
+            xi, xj = (i + dx) % N, (j + dy) % N #Les indices, avec CLP
+            type_voisin, id_voisin = M[xi, xj, :]
+            E_avant = J(val_old, cell_old, type_voisin, id_voisin)     #RENOMMER PROPREMENT
+            E_apres = J(val_new, cell_new, type_voisin, id_voisin)
+
+            dE_int += (E_apres - E_avant)
+
+
+
+        V_c1 = np.sum(M[:,:,1] == 1)
+        V_c2 = np.sum(M[:,:,1] == 2)
+
+        # variation pour chaque cellule selon l'échange, A OTPIMISER
+        dV_c1 = 0
+        dV_c2 = 0
+        if cell_old == 1:
+            dV_c1 -= 1
+        if cell_old == 2:
+            dV_c2 -= 1
+        if cell_new == 1:
+            dV_c1 += 1
+        if cell_new == 2:
+            dV_c2 += 1
+
+
+
+
+        dE_vol_1 = lbda * ((V_c1 + dV_c1 - V_cible_c1)**2 - (V_c1 - V_cible_c1)**2)
+        dE_vol_2 = lbda * ((V_c2 + dV_c2 - V_cible_c2)**2 - (V_c2 - V_cible_c2)**2)
+        dE_vol = dE_vol_1 + dE_vol_2
+
+        dE = dE_int + dE_vol
+
+        # --- Metropolis ---
+        if dE <= 0 or np.random.rand() < np.exp(-dE / T):
+            M[i,j,0] = val_new
+            M[i,j,1] = cell_new
+
+    return M
+
+#%%
+
+# M = initial_state_2_rond(25)
+M = initial_state_2_carre()
+
+def def_temp(M, nb_pas):
+    M = np.copy(M)
+    # summ = np.zeros(nb_pas)
+    for i in range(nb_pas):
+        increase_temps(M, 10)
+        # summ[i] = np.sum(M)
+        if i % 1000 == 0:
+            plot_cell(M, time = i)
+            # plot_ids(M, time = i)
+    # plt.plot(np.arange(0,nb_pas, 1), summ)
+    # plt.xlabel('temps')
+    # plt.ylabel('nombre de pixels 1')
+
+def_temp(M, 100000)
+
