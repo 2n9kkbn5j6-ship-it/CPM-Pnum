@@ -1,0 +1,105 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Nov  6 11:02:35 2025
+
+@author: 33782
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+#%%
+
+N = 100        #Cote de la matrice
+T_boltz = 1
+J_12 = 1000
+J_10
+lbda = 0.5
+V_cible = 2000
+
+
+#%%
+
+def initial_state_2_rond(r):
+    M = np.zeros((N, N))
+    centre_x_1, centre_y_1 = int(2*N/3), int(2*N/3)
+    centre_x_2, centre_y_2 = int(N/3), int(N/3)
+
+
+    for i in range(N):
+        for j in range(N):
+            if np.sqrt((i - centre_x_1)**2 + (j - centre_y_1)**2) <= r:
+                M[i,j] = 1
+
+    for i in range(N):
+        for j in range(N):
+            if np.sqrt((i - centre_x_2)**2 + (j - centre_y_2)**2) <= r:
+                M[i,j] = 2
+    return M
+
+#plt.imshow(initial_state_2_rond(35))
+
+
+#%%
+
+def increase_temps(M, nb_change, J = J, lbda=lbda, V_cible=V_cible):
+    '''
+    Parameters
+    ----------
+    M : matrice, de taille NxN
+        La matrice de laquelle on part
+    nb_change : int
+        Le nombre de changements par pas de temps
+
+    Returns
+    -------
+    M : matrice, de taille NxN
+        La MEME matrice, avec modifications eventuellement
+
+    '''
+    for _ in range(nb_change):
+        i, j = np.random.randint(0, N, 2) #l'indice de la matrice à changer
+
+
+        val_old = M[i,j]   #Au lieu de faire une copie de toute ma matrice avec np.copy, je fais juste une copie de l'élément intéresant
+        voisins = M[(i+1)%N, j] + M[(i-1)%N, j] + M[i, (j+1)%N] + M[i, (j-1)%N] #Pareil pour l'interfaace, je n'ai pas besoi de tout reclculer, mais uste localement
+        val_new = np.random.choice([voisins])
+
+        diff = val_new - val_old
+        if diff == 2:
+            dV2 = 1
+        if diff == -2:
+            dV2 = -1
+        else:
+            diff_mult = diff * val_old
+            if diff_mult == 0:
+                dV1 = 1
+            if diff_mult == 1:
+                dV1 = -1
+                dV2 = 1
+            if diff_mult == -1:
+                dv1 = -1
+            if diff_mult == -2:
+                dV1 = 1
+                dV2 = -1
+
+
+        vol_1_si_accepte += 1 for elt in M if elt == 1
+        vol_2_si_accepte += 1 for elt in M if elt == 2
+
+        dE_vol_1 = lbda * (vol_1_si_accepte + dV - V_cible_1)**2 - lbda * (vol_1_si_accepte - V_cible_1)**2
+        dE_vol_2 = lbda * (vol_2_si_accepte + dV - V_cible_2)**2 - lbda * (vol_2_si_accepte - V_cible_2)**2
+
+
+        if val_old == 0:
+            dE_int = J * (2 - voisins)   # La logique m'est apparue tard, à vérifier...
+        else:
+            dE_int = J * (voisins - 2)
+
+        dE = dE_vol + dE_int
+
+        if dE <= 0 or np.random.rand() < np.exp(-dE / T_boltz): #Metropolis (cf cours M1 C)
+            M[i,j] = val_new  # accepter
+
+    return M
+
