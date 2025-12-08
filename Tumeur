@@ -1,0 +1,761 @@
+
+
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Dec  1 14:29:04 2025
+
+@author: 33782
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+from skimage.segmentation import find_boundaries
+import numba
+
+
+#%% Paramètres
+
+N = 150  # taille de la matrice carrée
+
+# tensions de surface
+J_11 = 5
+J_10 = 100
+
+# température effective
+T_boltz = 10.0
+
+# énergie de volume
+lbda = 1.0
+
+# volume cible initial de chaque cellule
+Vol_cible_init = 120
+
+# critères de division
+aire_max = 150
+ratio_air_perimetre = 2
+
+# Pour la diffusion
+Diff = 1.0
+h = 1.0  # taille d'un pixel, pour l'équation de diffusion
+S_outside = 2.0   # Nutriements en dehors de la tumeur
+S_apoptose = 1.5   #Nutriment relachés par une cellule en apoptose
+conso_nutr = 0.03
+diff_tol = 1e-6
+max_diff_iters = 10000
+Nq = 0.1
+
+#%% variables principales
+
+
+num_map = np.zeros((N, N), dtype=np.int32)
+aires = []          # volumes des cellules, aires[ k-1] = numéro de la cellule k
+compteur_cell = 0   # nombre de cellules existantes
+nutr_map = np.ones((N, N), dtype=np.float64) * S_outside
+L_apoptose = [10000]
+
+
+
+Vol_cible = []
+
+#%% Initialisation
+
+
+def init(rr=4):
+    """Initialise une cellule au centre avec rayon rr"""
+    global num_map, aires, compteur_cell, Vol_cible, nutr_map, L_apoptose
+    cx, cy = N//2, N//2
+    compteur_cell = 1
+    compt = 0
+    for i in range(N):
+        for j in range(N):
+            if (i - cx)**2 + (j - cy)**2 <= rr**2:
+                num_map[i, j] = 1
+                compt += 1
+                nutr_map[i,j] = 0
+    aires.clear()
+    aires.append(compt)
+    Vol_cible.clear()
+    Vol_cible.append(Vol_cible_init)
+    
+    
+init()
+
+
+#%% Affichage
+
+
+def plot_both(num_map, nutr_map, time=None):
+    # Détermination du type de cellule
+    type_map = (num_map != 0).astype(float)
+
+    # Bordures
+    borders = find_boundaries(num_map, mode='inner')
+    img = type_map.copy()
+    img[borders] = 2.0  # Valeur spéciale pour les bordures
+
+    # Figure
+    fig, axs = plt.subplots(1, 2)
+    plt.tight_layout(pad=3.0)
+    # Réduction de l'espace horizontal entre les deux plots
+    plt.subplots_adjust(wspace=0.05)
+
+    # --- PLOT 1 : Carte des cellules ---
+    cmap_cells = plt.cm.inferno
+    cmap_cells.set_over('cyan')  # Couleur spéciale pour les bordures
+
+    axs[0].imshow(img, cmap=cmap_cells, interpolation='nearest')
+    axs[0].set_title("Tumeur", fontsize=12)
+    axs[0].axis('off')
+
+    # --- PLOT 2 : Nutriments ---
+    im1 = axs[1].imshow(nutr_map, cmap='viridis')
+    axs[1].set_title("Concentration en nutriments", fontsize=12)
+    axs[1].axis('off')
+
+    # Barre de couleur pour les nutriments
+    # cbar = fig.colorbar(im1, ax=axs[1], fraction=0.046, pad=0.04)
+    # cbar.set_label("Nutriments", rotation=270, labelpad=12)
+
+    plt.show()
+    
+def plot_apoptose(num_map, nutr_map, time=None):
+    # Détermination du type de cellule
+    type_map = (num_map != 0).astype(float)
+
+    # Bordures
+    borders = find_boundaries(num_map, mode='inner')
+    img = type_map.copy()
+    for i in range(N):
+        for j in range(N):
+            if num_map[i,j] > 0 and num_map[i,j] in L_apoptose:
+                img[i,j] = 1
+            elif num_map[i,j] > 0:
+                img[i,j] = 2
+    img[borders] = 3.0  # Valeur spéciale pour les bordures
+
+    # Figure
+    fig, axs = plt.subplots(1, 2)
+    plt.tight_layout(pad=3.0)
+    # Réduction de l'espace horizontal entre les deux plots
+    plt.subplots_adjust(wspace=0.05)
+
+    # --- PLOT 1 : Carte des cellules ---
+    cmap_cells = plt.cm.inferno
+    cmap_cells.set_over('cyan')  # Couleur spéciale pour les bordures
+
+    axs[0].imshow(img, cmap=cmap_cells, interpolation='nearest')
+    axs[0].set_title("Tumeur", fontsize=12)
+    axs[0].axis('off')
+
+    # --- PLOT 2 : Nutriments ---
+    im1 = axs[1].imshow(nutr_map, cmap='viridis')
+    axs[1].set_title("Concentration en nutriments", fontsize=12)
+    axs[1].axis('off')
+
+    # Barre de couleur pour les nutriments
+    # cbar = fig.colorbar(im1, ax=axs[1], fraction=0.046, pad=0.04)
+    # cbar.set_label("Nutriments", rotation=270, labelpad=12)
+
+    plt.show()
+
+
+#%% Centre de masse
+
+@numba.njit
+def centre_mass_cell(num_map_f, num_cell):
+    cpt = 0
+    numerateur = np.zeros(2)
+    for i in range(N):
+        for j in range(N):
+            if num_map_f[i, j] == num_cell:
+                numerateur[0] += i
+                numerateur[1] += j
+                cpt += 1
+    if cpt == 0:
+        return np.array([np.nan, np.nan])
+    return numerateur / cpt
+
+
+
+#%% Périmètre
+
+@numba.njit
+def perimetre_cellule_i(num_map_local, num_cell):
+    perimetre = 0
+    for i in range(N):
+        for j in range(N):
+            if num_map_local[i,j] == num_cell:
+                for di,dj in [(1,0),(-1,0),(0,1),(0,-1)]:
+                    ni, nj = i + di, j + dj
+                    if ni<0 or ni>=N or nj<0 or nj>=N or num_map_local[ni,nj] != num_cell:
+                        perimetre +=1
+    return perimetre
+
+
+
+#%% Parcours en largeur, pour pas trous dans diffusion:
+
+
+
+
+def mask(num_map):    
+
+    start_x, start_y = 0, 0   #On suppose que en haut à droite, il n'y a pas de cellules
+    NN = len(num_map[0])
+    
+    
+    a_visiter = []
+    a_visiter.append([start_x, start_y])
+    
+
+    visited = []
+    visited.append([start_x,start_y])
+    dirs = np.array([[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]],dtype=np.int64)
+    
+    while len(a_visiter) > 0:
+        
+        x, y = a_visiter.pop()
+
+        for d in range(8):
+            nx = (x+dirs[d,0])%NN
+            ny = (y+dirs[d,1])%NN #CLP
+            
+            if num_map[nx,ny]==0 and [nx,ny] not in visited:
+                visited.append([nx,ny])
+
+
+    return visited  
+
+
+#%% Diffusion
+
+# @numba.njit
+# def diffusion_nutroment_solve(c, num_map, max_iters = 20, tol = 1e-5):
+
+#     # On Récupère l'extérieur 'réel' de la tumeur
+#     outside = mask(num_map)
+
+    
+#     lamb = np.zeros((N, N), dtype=np.float64)   #Tableau de notre consommation locale
+    
+    
+#     for i in range(N):
+#         for j in range(N):
+#             if [i,j] not in outside and num_map[i, j] > 0:  # Cellule proliférante
+#                 lamb[i,j] = conso_nutr
+                
+#             else:
+#                 lamb[i,j] = 0.0         # A améliorer avec des cellules quiescentes après
+#                 c[i,j] = S_outside
+    
+
+#     denom_const = Diff / (h**2)
+    
+    
+#     for it in range(max_iters):     #Schéma Gauss–Seidel, à revoir
+#         maxdiff = 0.0
+#         for i in range(0, N):
+#             for j in range(0, N):  #On évite les bords
+#                 if num_map[i,j] > 0:    #On évite les parties hors de la tumeur
+#                     # print(i,j)
+        
+            
+#                     num = c[i+1,j] + c[i-1,j] + c[i,j+1] + c[i,j-1]
+#                     denom = 4.0 + lamb[i,j]/denom_const
+#                     c_new = num / denom  
+                    
+#                     diff = abs(c_new - c[i,j])
+#                     if diff > maxdiff:
+#                         maxdiff = diff
+#                     c[i,j] = c_new
+                
+#         if maxdiff < tol:
+#             break
+        
+#     return c
+
+# @numba.njit
+def diffusion_nutroment_solve(c, num_map, L_apoptose, max_iters = 20, tol = 1e-5):
+
+    # On Récupère l'extérieur 'réel' de la tumeur
+    # outside = mask(num_map)
+
+    
+    lamb = np.zeros((N, N), dtype=np.float64)   #Tableau de notre consommation locale
+    
+    
+    for i in range(N):
+        for j in range(N):
+            # if [i,j] not in outside and num_map[i, j] > 0:  # Cellule proliférante
+            if num_map[i, j] > 0:
+                lamb[i,j] = conso_nutr
+            else:
+                c[i,j] = S_outside
+
+    # for i in range(N):
+    #     c[i,0] = S_outside
+    #     c[0,i] = S_outside
+    #     c[i,N-1] = S_outside
+    #     c[N-1,i] = S_outside
+        
+        
+    # for n in range(compteur_cell):
+    #     if n + 1 in L_apoptose:
+    #         for i in range(N):
+    #             for j in range(N):
+    #                 if num_map[i,j] == n+1:
+    #                     c[i,j] = S_apoptose
+    for n in L_apoptose:
+        c[num_map == n] = S_apoptose                   
+                        
+    # cell_i in range(compteur_cell)
+    # plt.imshow(c)
+    # plt.show()
+        
+    
+
+    denom_const = Diff / (h**2)
+    
+    
+    for it in range(max_iters):     #Schéma Gauss–Seidel, à revoir
+        maxdiff = 0.0
+        for i in range(1, N-1):
+            for j in range(1, N-1):  #On évite les bords
+                if num_map[i,j] > 0:    #On évite les parties hors de la tumeur
+                    # print(i,j)
+        
+            
+                    num = c[i+1,j] + c[i-1,j] + c[i,j+1] + c[i,j-1]
+                    denom = 4.0 + lamb[i,j]/denom_const
+                    c_new = num / denom  
+                    
+                    diff = abs(c_new - c[i,j])
+                    if diff > maxdiff:
+                        maxdiff = diff
+                    c[i,j] = c_new
+                
+        if maxdiff < tol:
+            break
+        
+    return c
+
+
+
+
+
+
+#%%
+
+
+@numba.njit
+def nutriment_cell_i(nutr_map, num_map, cell_num):
+    '''
+    renvoie la moyenne des nutriments de la cellule i
+    '''
+    summ, compt = 0, 0
+    for i in range(N):
+        for j in range(N):
+            if num_map[i,j] == cell_num:
+                summ += nutr_map[i,j]
+                compt += 1
+    if compt == 0:
+        return 0.0
+    
+    return summ / compt
+
+#%% Growth rate
+
+# @numba.njit
+# def Growth_rate(Nutriment, Nq):
+#     if Nutriment < Nq:
+#         return 0.1
+#     elif Nutriment < 3 * Nq:
+#         return 1/2 * (1 - Nutriment/Nq)**2
+#     return 2    
+
+# @numba.njit
+def Growth_rate(Nutriment, Nq, in_apoptose):
+    if in_apoptose:
+        return 0.75
+    
+    elif Nutriment < Nq:
+        return 0.75
+    elif Nutriment >= 2 * Nq:
+        return 1.25
+    else:
+        return 1
+
+
+
+# @numba.njit 
+def increase_vol_cible(c, num_map, num_cell, Vol_cible_list, Nq):
+     
+    Nutr = nutriment_cell_i(c, num_map, num_cell)
+    inn_apoptose = suis_je_en_apoptose(num_cell, Nutr, Nq, L_apoptose)
+    # print((num_cell, len(Vol_cible_list)))
+    if num_cell <= len(Vol_cible_list):
+        Vol_cible_list[num_cell - 1] *= Growth_rate(Nutr, Nq, inn_apoptose) #Vol_cible_list[num_cell - 1]
+    # else:
+    #     print('pb')
+         
+    return Vol_cible_list
+
+#%% Apoptose?
+
+# @numba.njit
+def suis_je_en_apoptose(num_cell, Nutriment, Nq, L_apoptose):
+    if Nutriment < Nq or num_cell in L_apoptose:
+        return True
+    return False
+
+
+
+
+#%% Connexité
+
+
+
+
+@numba.njit
+def cell_est_connexe(num_map, num_cell, N):
+    start_found = False
+    for i in range(N):
+        for j in range(N):
+            if num_map[i, j] == num_cell:
+                start_x, start_y = i, j
+                start_found = True
+                break
+        if start_found:
+            break
+    if not start_found:
+        return True
+    total = 0
+    for i in range(N):
+        for j in range(N):
+            if num_map[i, j] == num_cell:
+                total += 1
+    queue = np.empty((total,2), dtype=np.int64)
+    head = 0
+    tail = 0
+    queue[tail,0] = start_x
+    queue[tail,1] = start_y
+    tail +=1
+    visited = np.zeros((N,N), dtype=np.bool_)
+    visited[start_x,start_y] = True
+    count_visited = 1
+    dirs = np.array([[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]],dtype=np.int64)
+    while head<tail:
+        x, y = queue[head]
+        head += 1
+        for d in range(8):
+            nx = (x+dirs[d,0])%N
+            ny = (y+dirs[d,1])%N
+            if num_map[nx,ny]==num_cell and not visited[nx,ny]:
+                visited[nx,ny]=True
+                queue[tail,0]=nx
+                queue[tail,1]=ny
+                tail +=1
+                count_visited +=1
+                if count_visited==total:
+                    return True
+    return False 
+
+
+
+#%%
+
+# @numba.njit
+def dois_je_me_diviser(cell_id, num_map, aires, ratio_min=ratio_air_perimetre):
+    if cell_id >= len(aires):
+        return False
+    A = aires[cell_id]
+    P = perimetre_cellule_i(num_map, cell_id+1)
+    if P==0:
+        return False
+    return A/P > ratio_min
+
+
+
+
+#%% Division
+
+# @numba.njit
+def diviser_cellule(num_map, aires, num_cell, new_id, Vol_cible, max_trials=20):
+    
+    indices = np.argwhere(num_map==num_cell+1)
+    
+    if len(indices)==0:
+        return
+    
+    CMx, CMy = centre_mass_cell(num_map, num_cell+1)
+    
+    for _ in range(max_trials):
+        angle = np.random.uniform(0, 2*np.pi)
+        nx, ny = np.cos(angle), np.sin(angle)
+        temp_map = num_map.copy()
+        count_new = 0
+        
+        for (i,j) in indices:
+            prod = (i-CMx)*nx + (j-CMy)*ny #A VERIFIER...
+            
+            if prod>0:
+                temp_map[i,j] = new_id+1
+                count_new +=1
+                
+        # if count_new>0 and count_new < len(indices):
+        conn1 = cell_est_connexe(temp_map, num_cell+1, N)
+        conn2 = cell_est_connexe(temp_map, new_id+1, N)
+        
+        if conn1 and conn2:
+            num_map[:,:] = temp_map
+            
+            if new_id >= len(aires):
+                aires.append(count_new)
+                Vol_cible.append(Vol_cible_init)
+                # print(len(aires), len(Vol_cible))
+            else:
+                aires[new_id] = count_new
+                Vol_cible[new_id] = Vol_cible_init
+            aires[num_cell] -= count_new
+            Vol_cible[num_cell] = Vol_cible_init
+            # print('1 diivision')
+            # print(len(aires), len(Vol_cible))
+            return
+        
+        
+#%% Énergie d'interface
+
+@numba.njit
+def J(num_cell, num_voisin):
+    if num_cell==num_voisin:
+        return 0
+    if num_cell==0 or num_voisin==0:
+        return J_10
+    return J_11
+
+@numba.njit
+def dE_int(num_map, i,j,num_new):
+    num_old = num_map[i,j]
+    delta = 0
+    for di,dj in [(-1,0),(1,0),(0,-1),(0,1)]:
+        ni,nj = (i+di)%N, (j+dj)%N
+        delta += J(num_new,num_map[ni,nj])-J(num_old,num_map[ni,nj])
+    return delta
+
+
+#%% Energie de volume
+
+
+# @numba.njit
+def dE_volume_local(aires, num_old, num_new,  Vol_cible):
+    dE=0.0
+    if num_old>0 and num_old<=len(aires):
+        V_before = aires[num_old-1]
+        dE += (V_before-1-Vol_cible[num_old - 1])**2-(V_before-Vol_cible[num_old - 1])**2
+    if num_new>0 and num_new<=len(aires):
+        V_before = aires[num_new-1]
+        dE += (V_before+1-Vol_cible[num_new - 1])**2-(V_before-Vol_cible[num_new - 1])**2
+    return lbda*dE
+
+
+#%% Increase temps4
+
+
+
+# @numba.njit
+def increase_temps(num_map, aires, compteur_cell, nb_change, Vol_cible, nutr_map, L_apoptose):
+    voisins_numero = [(1,0),(-1,0),(0,1),(0,-1),(1,1),(-1,-1),(1,-1),(-1,1)]
+    
+    '''1: Mise à jour des cellules en apoptose'''
+    for n in range(compteur_cell):
+        Nutriment = nutriment_cell_i(nutr_map, num_map, n)
+        if suis_je_en_apoptose(n, Nutriment, Nq, L_apoptose):
+            if (n + 1) not in L_apoptose:
+                L_apoptose.append(n + 1)
+    # print(L_apoptose)
+    # print(compteur_cell, len(L_apoptose) - 1)
+    
+    
+    '''1 Les nutriments diffusent '''
+    nutr_map = diffusion_nutroment_solve(nutr_map, num_map, L_apoptose)
+    
+    # print('(compteur_cell, len(Vol_cible)) = ', (compteur_cell, len(Vol_cible)))
+    # for n in range(compteur_cell):
+        # print((len(Vol_cible), n))
+        
+        
+    for n in range(compteur_cell):
+        Vol_cible =  increase_vol_cible(nutr_map, num_map, n, Vol_cible, Nq)
+        if dois_je_me_diviser(n,num_map,aires):
+            new_id = compteur_cell
+            diviser_cellule(num_map,aires,n,new_id, Vol_cible)
+            compteur_cell = len(Vol_cible)
+            
+
+            
+            
+    # Monte Carlo
+    for _ in range(nb_change):
+        
+        i,j = np.random.randint(0,N), np.random.randint(0,N)
+        
+        num_old = num_map[i,j]
+        di,dj = voisins_numero[np.random.randint(0,8)]
+        ni,nj = (i+di)%N,(j+dj)%N
+        num_new = num_map[ni,nj]
+        
+        
+        if num_old==num_new:
+            continue
+        
+        
+        
+        dE = dE_int(num_map,i,j,num_new) + dE_volume_local(aires,num_old,num_new, Vol_cible)
+        
+        
+        if dE<=0 or np.random.rand()<np.exp(-dE/T_boltz):
+            num_map[i,j]=num_new
+            if num_old>0 and num_old<=len(aires):
+                aires[num_old-1]-=1
+            if num_new>0 and num_new<=len(aires):
+                aires[num_new-1]+=1
+                
+                
+    return num_map,aires,compteur_cell, Vol_cible, nutr_map, L_apoptose
+
+
+#%%
+
+@numba.njit
+def comptage_cellules(num_map):
+    nombre_list = []
+    for i in range(N):
+        for j in range(N):
+            if num_map[i,j] not in nombre_list:
+                nombre_list.append(num_map[i,j])
+    return len(nombre_list) - 1 #Pour ne pas prendre en ocmpte le milieu 0 
+
+def comptage_cellules_necrosées(num_map, L_apoptose):
+    apoptose_liste = []
+    for i in range(N):
+        for j in range(N):
+            if num_map[i,j] not in apoptose_liste:
+                if num_map[i,j] in L_apoptose:
+                    apoptose_liste.append(num_map[i,j])
+    return len(apoptose_liste)
+
+def vol_tumeur(num_map):
+    return np.sum(num_map > 0)
+
+
+#%% Défilement du temps
+
+
+compteur_nb_cell = []
+compteur_necrose = []
+compteur_cell_non_necrose = []
+Vol_tumeur = []
+
+def defiler_temps(nb_temps):
+    
+    global num_map,aires,compteur_cell, Vol_cible, nutr_map, L_apoptose
+    
+    
+    for t in range(nb_temps):
+        num_map,aires,compteur_cell, Vol_cible, nutr_map, L_apoptose = increase_temps(num_map,aires,compteur_cell,N**2, Vol_cible, nutr_map, L_apoptose)
+        compteur_nb_cell.append(comptage_cellules(num_map))
+        compteur_necrose.append(comptage_cellules_necrosées(num_map, L_apoptose))
+        compteur_cell_disparues.append(compteur_cell - comptage_cellules(num_map))
+        Vol_tumeur.append(vol_tumeur(num_map))
+        if t%10==0:
+            # plt.imshow(num_map,cmap='inferno')
+            # plt.show()
+            # plot_type(num_map,time=t)
+            # plt.imshow(nutr_map)
+            # plt.show()
+
+            # plot_both(num_map, nutr_map, time = t)
+            plot_apoptose(num_map, nutr_map, time = t)
+            # print(comptage_cellules(num_map))
+            # print(comptage_cellules_necrosées(num_map, L_apoptose))
+            print(f'A t = {t}, on a {compteur_cell} cellules et {len(L_apoptose) - 1} cellules en apoptose')
+            # print(compteur_cell, len(L_apoptose) - 1)
+        if t%100 == 0:
+            aires_sans_zero = [x for x in aires if x != 0]
+
+            plt.hist(aires_sans_zero)
+            plt.xlabel("Aire des cellules")
+            plt.show()
+
+
+#%%
+
+num_map = np.zeros((N, N), dtype=np.int32)
+aires = []          # volume cellule, aire[ k-1] = aire de la cellule k
+Vol_cible = []
+compteur_cell = 0   # nombre de cellules existantes
+nutr_map = np.ones((N, N), dtype=np.float64) * S_outside
+compteur_nb_cell = []
+compteur_necrose = []
+compteur_cell_non_necrose = []
+Vol_tumeur = []
+compteur_cell_disparues = []
+
+L_apoptose = [1000]
+
+
+init()
+
+
+defiler_temps(400)
+
+
+#%% 
+
+Tt = np.arange(0, len(compteur_nb_cell), 1)
+
+plt.plot(Tt,  compteur_nb_cell, label = 'nb de cellules')
+plt.plot(Tt, compteur_necrose, label = 'cellules necrosées')
+plt.plot(Tt, compteur_cell_disparues, label = 'cellules disparues')
+plt.legend()
+plt.show()
+
+plt.plot(Tt, Vol_tumeur, label = 'volume de la tumeur')
+plt.legend()
+plt.show()
+
+
+#%%
+
+def gompertzienne(t, k, a):
+    return  k * np.exp( np.log(1 / k) * np.exp( - a * t))
+
+
+import scipy.optimize
+
+p0 = (1,1)
+par, cov = scipy.optimize.curve_fit(gompertzienne, Tt, Vol_tumeur, p0 = p0)
+print(f'par = {par}')
+print(f'cov = {np.sqrt(np.diag(cov))}')
+
+X = np.linspace(0, max(Tt), 1000)
+Y = gompertzienne(X, *par)
+
+plt.plot(Tt,  Vol_tumeur, label = 'simulation')
+plt.plot(X, Y, label = 'Fit gompertzien')
+plt.legend()
+plt.show()
+
+#%%
+
+
+
+
+
+
+
+
+
+
+
+
