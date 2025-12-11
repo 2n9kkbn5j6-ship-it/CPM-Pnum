@@ -1,0 +1,605 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Dec  1 14:29:04 2025
+
+@author: 33782
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+from skimage.segmentation import find_boundaries
+import numba
+
+
+
+#%% Paramètres
+
+N = 150  # taille de la matrice carrée
+
+# tensions de surface
+J_11 = 5
+J_10 = 100
+
+# température effective
+T_boltz = 10.0
+
+# énergie de volume
+lbda = 1.0
+
+# volume cible initial de chaque cellule
+Vol_cible_init = 120
+
+# critères de division
+aire_max = 150
+ratio_air_perimetre = 2
+
+# Pour la diffusion
+Diff = 1.0
+h = 1.0  # taille d'un pixel, pour l'équation de diffusion
+S_outside = 2.0   # Nutriements en dehors de la tumeur
+conso_nutr = 0.03
+diff_tol = 1e-5
+max_diff_iters = 5000
+Nq = 0.5
+
+#%% variables principales
+
+
+num_map = np.zeros((N, N), dtype=np.int32)
+aires = []          # volumes des cellules, aires[ k-1] = numéro de la cellule k
+compteur_cell = 0   # nombre de cellules existantes
+nutr_map = np.ones((N, N), dtype=np.float64) * S_outside
+
+
+
+Vol_cible = []
+
+#%% Initialisation
+
+
+def init(rr=4):
+    """Initialise une cellule au centre avec rayon rr"""
+    global num_map, aires, compteur_cell, Vol_cible, nutr_map
+    cx, cy = N//2, N//2
+    compteur_cell = 1
+    compt = 0
+    for i in range(N):
+        for j in range(N):
+            if (i - cx)**2 + (j - cy)**2 <= rr**2:
+                num_map[i, j] = 1
+                compt += 1
+                nutr_map[i,j] = 0
+    aires.clear()
+    aires.append(compt)
+    Vol_cible.clear()
+    Vol_cible.append(Vol_cible_init)
+    
+    
+init()
+
+
+#%% Affichage
+
+
+def plot_type(num_map, time=None):
+    type_map = (num_map != 0).astype(int)
+    
+    borders = find_boundaries(num_map, mode='inner') #Trouve les frontières
+    img = type_map.astype(float)  #Copie, pour ne pas abimer la matrice
+    img[borders] = 2  # surimpression des bordures
+    
+    
+    plt.imshow(img, cmap='inferno', interpolation='nearest') #On affiche
+    if time is not None:
+        plt.title(f"t = {time}")
+    plt.axis('off')
+    plt.show()
+    
+
+
+def plot_both(num_map, nutr_map, time=None):
+    type_map = (num_map != 0).astype(float) # Détermination du type de cellule
+
+    
+    borders = find_boundaries(num_map, mode='inner') # Bordures
+    img = type_map.copy()
+    img[borders] = 2.0  # surimpression des bordures
+
+    # On affiche
+    fig, axs = plt.subplots(1, 2)
+    plt.tight_layout(pad=3.0)
+    plt.subplots_adjust(wspace=0.05) #Pour faire joli
+
+
+    cmap_cells = plt.cm.inferno #la couleur
+    cmap_cells.set_over('cyan')  # Couleur spéciale pour les bordures
+
+    axs[0].imshow(img, cmap=cmap_cells, interpolation='nearest')
+    axs[0].set_title("Tumeur", fontsize=12)
+    axs[0].axis('off')
+
+
+    im1 = axs[1].imshow(nutr_map, cmap='viridis')
+    axs[1].set_title("Concentration en nutriments", fontsize=12)
+    axs[1].axis('off')
+
+    # Barre de couleur pour les nutriments
+    # cbar = fig.colorbar(im1, ax=axs[1], fraction=0.046, pad=0.04)
+    # cbar.set_label("Nutriments", rotation=270, labelpad=12)
+
+    plt.show()
+
+
+#%% Centre de masse
+
+@numba.njit
+def centre_mass_cell(num_map_f, num_cell):
+    '''Renvoie le centre de masse de la cellule num_cell'''
+    
+    cpt = 0
+    numerateur = np.zeros(2)
+    
+    for i in range(N):
+        for j in range(N):
+            if num_map_f[i, j] == num_cell:
+                numerateur[0] += i
+                numerateur[1] += j
+                cpt += 1
+                
+    if cpt == 0:
+        return np.array([np.nan, np.nan]) #S'il n'y a pas de cellules, on return nan
+    
+    
+    return numerateur / cpt
+
+
+
+#%% Périmètre
+
+@numba.njit
+def perimetre_cellule_i(num_map_local, num_cell):
+    '''Renvoie le périmètre de la cellule num_cell'''
+    
+    perimetre = 0
+    
+    for i in range(N):
+        for j in range(N):
+            if num_map_local[i,j] == num_cell: #Si on est dans la cellule
+                for di,dj in [(1,0),(-1,0),(0,1),(0,-1)]:
+                    ni, nj = (i + di) % N, (j + dj)%N
+                    
+                    if num_map_local[ni,nj] != num_cell: #Si on n'est plus dans la cellule, avec CLP
+                        perimetre +=1
+    return perimetre
+
+
+
+#%% Parcours en largeur, pour régler le problème des trous dans diffusion:
+
+
+#Non utilisée finalement
+def mask(num_map):    
+    '''Le but est de faire un mask pour les conditions initiales de nutriments'''
+
+    start_x, start_y = 0, 0   #On suppose que en haut à droite, il n'y a pas de cellules
+    NN = len(num_map[0])
+    
+    
+    a_visiter = [] #Liste des indices à visiter
+    a_visiter.append([start_x, start_y])
+    
+
+    visited = [] #Liste des indices visités
+    visited.append([start_x,start_y])
+    dirs = np.array([[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]],dtype=np.int64)
+    
+    while len(a_visiter) > 0:
+        
+        x, y = a_visiter.pop() #On enlève la dernière valeur
+
+        for d in range(8): #On regarde ses voisins
+            nx = (x+dirs[d,0])%NN
+            ny = (y+dirs[d,1])%NN #CLP
+            
+            if num_map[nx,ny]==0 and [nx,ny] not in visited: #Si on est dans le milieu et si on ne l'a pas enccore visité
+                visited.append([nx,ny])
+
+
+    return visited  
+
+
+#%% Diffusion
+
+
+@numba.njit
+def diffusion_nutroment_solve(c, num_map, max_iters = 20, tol = 1e-5):
+
+    
+    lamb = np.zeros((N, N), dtype=np.float64)   #Tableau de notre consommation locale
+    
+    
+    for i in range(N):
+        for j in range(N):
+            # if [i,j] not in outside and num_map[i, j] > 0:  # Cellule proliférante
+            if num_map[i, j] > 0:
+                lamb[i,j] = conso_nutr
+
+    for i in range(N): #Conditions aux bords: S_outside aux bords
+        c[i,0] = S_outside
+        c[0,i] = S_outside
+        c[i,N-1] = S_outside
+        c[N-1,i] = S_outside
+        
+    
+
+    denom_const = Diff / (h**2)
+    
+    
+    for it in range(max_iters):     #On fait plusieurs itérations, jusqu'à ce qu'on soit stationnaire
+        maxdiff = 0.0
+        for i in range(1, N-1):
+            for j in range(1, N-1):  #On évite les bords
+                if num_map[i,j] > 0:    #On évite les parties hors de la tumeur        
+            
+                    num = c[i+1,j] + c[i-1,j] + c[i,j+1] + c[i,j-1]
+                    denom = 4.0 + lamb[i,j]/denom_const
+                    c_new = num / denom  
+                    
+                    diff = abs(c_new - c[i,j])
+                    
+                    if diff > maxdiff: 
+                        maxdiff = diff
+                    c[i,j] = c_new #On n'est pas encore stationnaire
+                
+        if maxdiff < tol: #On est stationnaire !!
+            break
+        
+    return c
+
+
+
+
+
+
+#%%
+
+
+@numba.njit
+def nutriment_cell_i(nutr_map, num_map, cell_num):
+    '''
+    renvoie la moyenne des nutriments de la cellule i
+    '''
+    summ, compt = 0, 0
+    for i in range(N):
+        for j in range(N):
+            if num_map[i,j] == cell_num:
+                summ += nutr_map[i,j]
+                compt += 1
+    if compt == 0:
+        return 0.0
+    
+    return summ / compt
+
+#%% Growth rate
+
+ 
+
+@numba.njit
+def Growth_rate(Nutriment, Nq, in_apoptose = False):
+
+    if Nutriment < Nq:
+        return 0.75 #Si la cellule n'a pas assez de nutriments, son volume cible réduit de 1/4
+    
+    elif Nutriment >= 2 * Nq:
+        return 1.25 #Si elle a beaucoup de nutriments, son volume cible augmente de 1/4
+    else:
+        return 1 #Sinon, rien
+
+
+
+@numba.njit 
+def increase_vol_cible(c, num_map, num_cell, Vol_cible_list, Nq):
+     
+    Nutr = nutriment_cell_i(c, num_map, num_cell) #les nutriments de la cellule i
+    
+    
+    if num_cell <= len(Vol_cible_list):
+        Vol_cible_list[num_cell - 1] *= Growth_rate(Nutr, Nq)  #On channge son volume cible en fonction
+         
+    return Vol_cible_list
+
+ 
+
+
+
+
+#%% Connexité
+
+
+
+
+@numba.njit
+def cell_est_connexe(num_map, num_cell, N):
+    '''Parcours en largeur, pour trouver si la cellule est connexe ou pas'''
+    
+    start_found = False # On trouve un endroit où il y a la cellule num_cell
+    for i in range(N):
+        for j in range(N):
+            if num_map[i, j] == num_cell:
+                start_x, start_y = i, j
+                start_found = True #On l'a trouvé!!
+                break
+            
+        if start_found:
+            break
+        
+    if not start_found:
+        return True #Si la cellule a disparu, elle est connexe
+    
+    
+    
+    total = 0
+    for i in range(N):
+        for j in range(N):
+            if num_map[i, j] == num_cell:
+                total += 1 #L'aire de notre cellule
+                
+                
+    #Parcours en largeur, sans utiliser de deque pour Numba
+    queue = np.empty((total,2), dtype=np.int64)
+    head = 0
+    tail = 0
+    queue[tail,0] = start_x
+    queue[tail,1] = start_y
+    tail +=1
+    
+    visited = np.zeros((N,N), dtype=np.bool_) #Les endroits visités, booléen
+    visited[start_x,start_y] = True
+    count_visited = 1
+    dirs = np.array([[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]],dtype=np.int64) #Les 8 directions
+    
+    
+    while head<tail: #Tant qu'on a encore des endroits à visiter
+        x, y = queue[head]
+        head += 1
+        
+        for d in range(8): #Pour chaque directions
+            nx = (x+dirs[d,0])%N
+            ny = (y+dirs[d,1])%N
+            
+            if num_map[nx,ny]==num_cell and not visited[nx,ny]: # Si on est dans la cellule et qu'on ne l'a pas encore visité
+                visited[nx,ny]=True
+                
+                queue[tail,0]=nx #On met à jour les deux listes
+                queue[tail,1]=ny
+                tail +=1
+                
+                count_visited +=1
+                if count_visited==total: #Si on a visité par voisinage toute la cellule, la cellule est connexe
+                    return True
+    return False #Sinon, elle ne l'est pas
+
+
+
+#%%
+
+@numba.njit
+def dois_je_me_diviser(cell_id, num_map, aires, ratio_min=ratio_air_perimetre):
+    '''Renvoie si la cellule doit se diviser ou pas'''
+    
+    if cell_id >= len(aires):
+        return False #Problème de compteur, n'est plus sensé arriver
+    
+    A = aires[cell_id]
+    P = perimetre_cellule_i(num_map, cell_id+1)
+    
+    if P==0: #Si la cellule a disparu, elle ne se divise pas
+        return False
+    
+    return A/P > ratio_min #Le critère pour se diviser
+
+
+
+
+#%% Division
+
+@numba.njit
+def diviser_cellule(num_map, aires, num_cell, new_id, Vol_cible, max_trials=20):
+    '''Renvoie comment la cellule se divise, selon un axe particulier'''
+    
+    indices = np.argwhere(num_map==num_cell+1) #Là ou il y a la cellule num_cell
+    
+    if len(indices)==0: #Si la cellule a disparu, on arrête là
+        return
+    
+    CMx, CMy = centre_mass_cell(num_map, num_cell+1) #On trouve le centre de masse
+    
+    for _ in range(max_trials):
+        
+        angle = np.random.uniform(0, 2*np.pi) #On tire un angle aléatoire
+        nx, ny = np.cos(angle), np.sin(angle) #Projection dans un repère cartésien
+        
+        temp_map = num_map.copy() #Pour ne pas abimer la matrice principale
+        count_new = 0
+        
+        for (i,j) in indices:
+            prod = (i-CMx)*nx + (j-CMy)*ny #On recentre sur le CM, le signe sépare les deux parties de la droite définie par l'angle alpha
+            
+            if prod>0:
+                temp_map[i,j] = new_id+1
+                count_new +=1 #On sépare la cellule
+                
+        # if count_new>0 and count_new < len(indices):
+        conn1 = cell_est_connexe(temp_map, num_cell+1, N)
+        conn2 = cell_est_connexe(temp_map, new_id+1, N)
+        
+        if conn1 and conn2: #Si les deux nouvelles cellules sont connexes, on accepte le choix
+            num_map[:,:] = temp_map
+            
+            if new_id >= len(aires): #Normalement ok, plus de soucis là dessus
+                aires.append(count_new)
+                Vol_cible.append(Vol_cible_init)
+                # print(len(aires), len(Vol_cible))
+            else: #N'arrive plus
+                aires[new_id] = count_new
+                Vol_cible[new_id] = Vol_cible_init
+                
+            aires[num_cell] -= count_new
+            Vol_cible[num_cell] = Vol_cible_init #On mets les aires et les volumes cibles à jour
+            
+            return
+        
+        
+#%% Énergie d'interface
+
+@numba.njit
+def J(num_cell, num_voisin):
+    '''
+    Renvoie la bonne valeur de J entre deux pixels voisins
+    '''
+    if num_cell==num_voisin:
+        return 0
+    if num_cell==0 or num_voisin==0:
+        return J_10
+    return J_11
+
+@numba.njit
+def dE_int(num_map, i,j,num_new):
+    '''
+    On change l'élément i,j de M, la fonction renvoie l'éergie de surface que ce changement coute
+    '''
+    num_old = num_map[i,j]
+    delta = 0
+    for di,dj in [(-1,0),(1,0),(0,-1),(0,1)]:
+        ni,nj = (i+di)%N, (j+dj)%N
+        delta += J(num_new,num_map[ni,nj])-J(num_old,num_map[ni,nj])
+    return delta
+
+
+#%% Energie de volume
+
+
+@numba.njit
+def dE_volume_local(aires, num_old, num_new,  Vol_cible):
+    '''Pareil, avec l'énergie de volume (elasticité)'''
+    dE=0.0
+    if num_old>0 and num_old<=len(aires):
+        V_before = aires[num_old-1]
+        dE += (V_before-1-Vol_cible[num_old - 1])**2-(V_before-Vol_cible[num_old - 1])**2
+    if num_new>0 and num_new<=len(aires):
+        V_before = aires[num_new-1]
+        dE += (V_before+1-Vol_cible[num_new - 1])**2-(V_before-Vol_cible[num_new - 1])**2
+    return lbda*dE
+
+
+#%% Increase temps4
+
+
+
+@numba.njit
+def increase_temps(num_map, aires, compteur_cell, nb_change, Vol_cible, nutr_map):
+    voisins_numero = [(1,0),(-1,0),(0,1),(0,-1),(1,1),(-1,-1),(1,-1),(-1,1)]
+    
+    '''1 Les nutriments diffusent '''
+    nutr_map = diffusion_nutroment_solve(nutr_map, num_map)
+        
+    '''2 Les volumes cibles changent en conséquences, et on vérifie et fait les divisions'''    
+    for n in range(compteur_cell):
+        Vol_cible =  increase_vol_cible(nutr_map, num_map, n, Vol_cible, Nq)
+        if dois_je_me_diviser(n,num_map,aires):
+            new_id = compteur_cell
+            diviser_cellule(num_map,aires,n,new_id, Vol_cible)
+            compteur_cell = len(Vol_cible)
+            
+
+            
+            
+    '''3 Monte Carlo'''
+    for _ in range(nb_change):
+        
+        i,j = np.random.randint(0,N), np.random.randint(0,N) #Tirage aléatoire
+        
+        num_old = num_map[i,j] #L'ancien numéro
+        
+        di,dj = voisins_numero[np.random.randint(0,8)]
+        ni,nj = (i+di)%N,(j+dj)%N
+        
+        num_new = num_map[ni,nj] #Le nouveau numéro
+        
+        
+        if num_old==num_new:
+            continue #Si rien ne se passe, on continue
+        
+        
+        
+        dE = dE_int(num_map,i,j,num_new) + dE_volume_local(aires,num_old,num_new, Vol_cible) #variation d'énergie
+        
+        
+        if dE<=0 or np.random.rand()<np.exp(-dE/T_boltz): #Métropolis
+            num_map[i,j]=num_new
+            if num_old>0 and num_old<=len(aires):
+                aires[num_old-1]-=1
+            if num_new>0 and num_new<=len(aires):
+                aires[num_new-1]+=1
+                
+                
+    return num_map,aires,compteur_cell, Vol_cible, nutr_map
+
+
+#%%
+
+@numba.njit
+def comptage_cellules(num_map): 
+    '''On compte le nombre de cellules encore en vie'''
+    nombre_list = []
+    for i in range(N):
+        for j in range(N):
+            if num_map[i,j] not in nombre_list:
+                nombre_list.append(num_map[i,j])
+    return len(nombre_list) 
+
+
+#%% Défilement du temps
+
+list_compteur = []
+
+def defiler_temps(nb_temps):
+    
+    global num_map,aires,compteur_cell, Vol_cible, nutr_map
+    
+    
+    for t in range(nb_temps):
+        num_map,aires,compteur_cell, Vol_cible, nutr_map = increase_temps(num_map,aires,compteur_cell,N**2, Vol_cible, nutr_map)
+        list_compteur.append(comptage_cellules(num_map))
+        if t%10==0:
+
+            plot_both(num_map, nutr_map, time = t)
+
+
+#%%On remet les listes à zéro et on fait défiler le temps
+
+num_map = np.zeros((N, N), dtype=np.int32)
+aires = []          # volumes des cellules, aires[ k-1] = numéro de la cellule k
+Vol_cible = []
+compteur_cell = 0   # nombre de cellules existantes
+nutr_map = np.ones((N, N), dtype=np.float64) * S_outside
+list_compteur = []
+
+
+init()
+
+
+defiler_temps(220)
+
+
+
+
+
+
+
+
+
+
+
+
+
